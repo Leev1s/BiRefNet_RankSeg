@@ -1,0 +1,16 @@
+torch==2.9.1
+torchvision
+numpy
+opencv-python
+tqdm
+timm
+prettytable
+scipy
+scikit-image
+kornia
+gradio_imageslider>=0.0.18
+transformers
+huggingface_hub>=0.30
+einops
+requests
+rankseg
