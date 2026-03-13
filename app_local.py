@@ -165,9 +165,11 @@ def refine_foreground(image, mask, r=90, device='cuda'):
 
 
 def get_rankseg_mask(pred: torch.Tensor, metric: str) -> Image.Image:
-    rankseg = RankSEG(metric=metric, output_mode='multiclass', solver='RMA')
+    # BiRefNet produces a single foreground probability map, so RankSEG should
+    # return a binary mask for that one channel instead of a multiclass map.
+    rankseg = RankSEG(metric=metric, output_mode='multilabel', solver='RMA')
     probs = pred.unsqueeze(0).unsqueeze(0)
-    rankseg_pred = rankseg.predict(probs).squeeze(0).to(torch.float32)
+    rankseg_pred = rankseg.predict(probs).squeeze(0).squeeze(0).to(torch.float32)
     return transforms.ToPILImage()(rankseg_pred)
 
 
