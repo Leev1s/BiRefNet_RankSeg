@@ -167,13 +167,42 @@ def refine_foreground(image, mask, r=90, device='cuda'):
     return estimated_foreground
 
 
-def get_rankseg_mask(pred: torch.Tensor, metric: str) -> Image.Image:
+def get_rankseg_pred(pred: torch.Tensor, metric: str) -> torch.Tensor:
     # BiRefNet produces a single foreground probability map, so RankSEG should
     # return a binary mask for that one channel instead of a multiclass map.
     rankseg = RankSEG(metric=metric, output_mode='multilabel', solver='RMA')
-    probs = pred.unsqueeze(0).unsqueeze(0)
-    rankseg_pred = rankseg.predict(probs).squeeze(0).squeeze(0).to(torch.float32)
-    return transforms.ToPILImage()(rankseg_pred)
+    probs = pred.unsqueeze(0).unsqueeze(0).to(torch.float32)
+    return rankseg.predict(probs).squeeze(0).squeeze(0).to(torch.float32)
+
+
+def get_soft_gate(rankseg_mask: torch.Tensor, dilate_kernel: int = 9, blur_kernel: int = 15) -> torch.Tensor:
+    support = rankseg_mask.unsqueeze(0).unsqueeze(0).to(torch.float32)
+    dilated = torch.nn.functional.max_pool2d(
+        support,
+        kernel_size=dilate_kernel,
+        stride=1,
+        padding=dilate_kernel // 2,
+    )
+    soft_gate = torch.nn.functional.avg_pool2d(
+        dilated,
+        kernel_size=blur_kernel,
+        stride=1,
+        padding=blur_kernel // 2,
+    )
+    return soft_gate.squeeze(0).squeeze(0).clamp(0, 1)
+
+
+def build_hybrid_alpha(pred: torch.Tensor, rankseg_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    soft_gate = get_soft_gate(rankseg_mask)
+    hard_alpha = (pred * rankseg_mask.to(torch.float32)).clamp(0, 1)
+    soft_alpha = torch.where(rankseg_mask > 0, pred, pred * soft_gate).clamp(0, 1)
+    return hard_alpha, soft_alpha
+
+
+def build_alpha_cutout(image: Image.Image, mask: Image.Image) -> Image.Image:
+    output = image.copy()
+    output.putalpha(mask.resize(image.size))
+    return output
 
 
 def build_masked_image(image: Image.Image, mask: Image.Image) -> Image.Image:
@@ -269,7 +298,8 @@ def predict(images, resolution, weights_file, enable_rankseg, rankseg_metric):
 
     if isinstance(images, list):
         raw_save_paths = []
-        rankseg_save_paths = []
+        rankseg_hard_save_paths = []
+        rankseg_soft_save_paths = []
         save_dir = 'preds-BiRefNet'
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -295,37 +325,44 @@ def predict(images, resolution, weights_file, enable_rankseg, rankseg_metric):
 
         # Prediction
         with torch.no_grad():
-            preds = birefnet(image_proc.to(device).half())[-1].sigmoid().cpu()
+            preds = birefnet(image_proc.to(device).half())[-1].sigmoid().float().cpu()
         pred = preds[0].squeeze()
 
         pred_pil = transforms.ToPILImage()(pred)
-        raw_image_masked = build_masked_image(image, pred_pil)
-        rankseg_image_masked = None
+        raw_image_masked = build_alpha_cutout(image, pred_pil)
+        rankseg_hard_image_masked = None
+        rankseg_soft_image_masked = None
         if enable_rankseg:
-            rankseg_mask = get_rankseg_mask(pred, rankseg_metric)
-            rankseg_image_masked = build_masked_image(image, rankseg_mask)
+            rankseg_pred = get_rankseg_pred(pred, rankseg_metric)
+            hard_alpha, soft_alpha = build_hybrid_alpha(pred, rankseg_pred)
+            rankseg_hard_image_masked = build_alpha_cutout(image, transforms.ToPILImage()(hard_alpha))
+            rankseg_soft_image_masked = build_alpha_cutout(image, transforms.ToPILImage()(soft_alpha))
 
         if device == 'cuda':
             torch.cuda.empty_cache()
 
         if tab_is_batch:
             image_name = os.path.splitext(os.path.basename(image_src))[0]
-            raw_save_file_path = os.path.join(save_dir, f"{image_name}_raw.png")
+            raw_save_file_path = os.path.join(save_dir, f"{image_name}_pred.png")
             raw_image_masked.save(raw_save_file_path)
             raw_save_paths.append(raw_save_file_path)
-            if enable_rankseg and rankseg_image_masked is not None:
-                rankseg_save_file_path = os.path.join(save_dir, f"{image_name}_rankseg.png")
-                rankseg_image_masked.save(rankseg_save_file_path)
-                rankseg_save_paths.append(rankseg_save_file_path)
+            if enable_rankseg and rankseg_hard_image_masked is not None:
+                rankseg_hard_save_file_path = os.path.join(save_dir, f"{image_name}_pred_rankseg.png")
+                rankseg_hard_image_masked.save(rankseg_hard_save_file_path)
+                rankseg_hard_save_paths.append(rankseg_hard_save_file_path)
+            if enable_rankseg and rankseg_soft_image_masked is not None:
+                rankseg_soft_save_file_path = os.path.join(save_dir, f"{image_name}_pred_softgate.png")
+                rankseg_soft_image_masked.save(rankseg_soft_save_file_path)
+                rankseg_soft_save_paths.append(rankseg_soft_save_file_path)
 
     if tab_is_batch:
         zip_file_path = os.path.join(save_dir, "{}.zip".format(save_dir))
         with zipfile.ZipFile(zip_file_path, 'w') as zipf:
-            for file in raw_save_paths + rankseg_save_paths:
+            for file in raw_save_paths + rankseg_hard_save_paths + rankseg_soft_save_paths:
                 zipf.write(file, os.path.basename(file))
-        return raw_save_paths, rankseg_save_paths, zip_file_path
+        return raw_save_paths, rankseg_hard_save_paths, rankseg_soft_save_paths, zip_file_path
     else:
-        return image, raw_image_masked, rankseg_image_masked
+        return image, raw_image_masked, rankseg_hard_image_masked, rankseg_soft_image_masked
 
 
 examples = [[_] for _ in glob('examples/*')][:]
@@ -361,8 +398,9 @@ tab_image = gr.Interface(
     ],
     outputs=[
         gr.Image(label="Original image", type="pil", format='png'),
-        gr.Image(label="BiRefNet result", type="pil", format='png'),
-        gr.Image(label="BiRefNet + RankSEG", type="pil", format='png'),
+        gr.Image(label="BiRefNet pred alpha", type="pil", format='png'),
+        gr.Image(label="BiRefNet pred x RankSEG", type="pil", format='png'),
+        gr.Image(label="BiRefNet soft-gated hybrid", type="pil", format='png'),
     ],
     examples=examples,
     api_name="image",
@@ -380,8 +418,9 @@ tab_text = gr.Interface(
     ],
     outputs=[
         gr.Image(label="Original image", type="pil", format='png'),
-        gr.Image(label="BiRefNet result", type="pil", format='png'),
-        gr.Image(label="BiRefNet + RankSEG", type="pil", format='png'),
+        gr.Image(label="BiRefNet pred alpha", type="pil", format='png'),
+        gr.Image(label="BiRefNet pred x RankSEG", type="pil", format='png'),
+        gr.Image(label="BiRefNet soft-gated hybrid", type="pil", format='png'),
     ],
     examples=examples_url,
     api_name="URL",
@@ -398,8 +437,9 @@ tab_batch = gr.Interface(
         gr.Radio(RANKSEG_METRICS, value='dice', label="RankSEG metric", info="Choose the target metric for RankSEG post-processing.")
     ],
     outputs=[
-        gr.Gallery(label="BiRefNet results"),
-        gr.Gallery(label="BiRefNet + RankSEG results"),
+        gr.Gallery(label="BiRefNet pred alpha results"),
+        gr.Gallery(label="BiRefNet pred x RankSEG results"),
+        gr.Gallery(label="BiRefNet soft-gated hybrid results"),
         gr.File(label="Download masked images."),
     ],
     api_name="batch",
