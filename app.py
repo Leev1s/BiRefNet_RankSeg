@@ -298,10 +298,6 @@ def load_birefnet(weights_name: str):
     current_weights_id = weights_id
     return birefnet
 
-
-load_birefnet('General')
-
-
 @spaces.GPU
 def predict(images, resolution, weights_file, enable_rankseg, rankseg_metric):
     assert (images is not None), 'AssertionError: images cannot be None.'
