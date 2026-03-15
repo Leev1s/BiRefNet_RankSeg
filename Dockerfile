@@ -7,6 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_SYSTEM_PYTHON=1 \
     HF_HOME=/tmp/hf_cache \
     HF_MODULES_CACHE=/tmp/hf_cache/modules \
+    BIREFNET_MODEL_ROOT=/models \
     GRADIO_SERVER_NAME=0.0.0.0 \
     PORT=7860
 
@@ -26,6 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements-cloudrun.txt ./
 
 RUN uv pip install --system -r requirements-cloudrun.txt
+
+RUN mkdir -p /models && \
+    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='zhengpeng7/BiRefNet', local_dir='/models/BiRefNet', local_dir_use_symlinks=False)"
 
 COPY . .
 

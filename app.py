@@ -14,6 +14,7 @@ from torchvision import transforms
 import requests
 from io import BytesIO
 import zipfile
+from pathlib import Path
 
 # Keep HF caches in Cloud Run/HF Spaces writable temp storage.
 os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
@@ -276,10 +277,19 @@ current_weights_id = None
 birefnet = None
 
 
+def resolve_weights_source(weights_name: str) -> str:
+    repo_name = usage_to_weights_file[weights_name]
+    model_root = Path(os.environ.get("BIREFNET_MODEL_ROOT", "/models"))
+    local_model_dir = model_root / repo_name
+    if local_model_dir.is_dir():
+        return str(local_model_dir)
+    return '/'.join(('zhengpeng7', repo_name))
+
+
 def load_birefnet(weights_name: str):
     global birefnet, current_weights_id
 
-    weights_id = '/'.join(('zhengpeng7', usage_to_weights_file[weights_name]))
+    weights_id = resolve_weights_source(weights_name)
     if birefnet is not None and current_weights_id == weights_id:
         return birefnet
 
