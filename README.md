@@ -26,3 +26,37 @@ preload_from_hub:
 ---
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+## Deploy to Google Cloud Run with GPU
+
+This repo now includes a `Dockerfile` and `requirements-cloudrun.txt` for Cloud Run GPU deployment.
+
+Build the image:
+
+```bash
+gcloud builds submit --tag REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/birefnet-gradio
+```
+
+Deploy with an NVIDIA L4 GPU:
+
+```bash
+gcloud run deploy birefnet-gradio \
+  --image REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/birefnet-gradio \
+  --region REGION \
+  --gpu 1 \
+  --gpu-type nvidia-l4 \
+  --cpu 4 \
+  --memory 16Gi \
+  --concurrency 1 \
+  --timeout 3600 \
+  --max-instances 1 \
+  --port 7860 \
+  --allow-unauthenticated
+```
+
+Recommended optional flags for better cold-start behavior:
+
+```bash
+--cpu-boost \
+--min-instances 0
+```

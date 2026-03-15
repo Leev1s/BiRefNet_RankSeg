@@ -17,14 +17,34 @@ from torchvision import transforms
 import requests
 from io import BytesIO
 import zipfile
+from pathlib import Path
 
 from rankseg import RankSEG
+
+
+def get_default_hf_home() -> str:
+    if "HF_HOME" in os.environ:
+        return os.environ["HF_HOME"]
+
+    tmp_cache = Path("/tmp/hf_cache")
+    try:
+        tmp_cache.mkdir(parents=True, exist_ok=True)
+        return str(tmp_cache)
+    except OSError:
+        workspace_cache = Path.cwd() / ".cache" / "hf_cache"
+        workspace_cache.mkdir(parents=True, exist_ok=True)
+        return str(workspace_cache)
+
+
+os.environ.setdefault("HF_HOME", get_default_hf_home())
+os.environ.setdefault("HF_MODULES_CACHE", os.path.join(os.environ["HF_HOME"], "modules"))
 
 
 torch.set_float32_matmul_precision('high')
 # torch.jit.script = lambda f: f
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+model_dtype = torch.float16 if device == "cuda" else torch.float32
 RANKSEG_METRICS = ["dice", "iou"]
 
 
@@ -258,22 +278,42 @@ usage_to_weights_file = {
     'General-dynamic': 'BiRefNet_dynamic',
 }
 
-birefnet = transformers.AutoModelForImageSegmentation.from_pretrained('/'.join(('zhengpeng7', usage_to_weights_file['General'])), trust_remote_code=True)
-birefnet.to(device)
-birefnet.eval(); birefnet.half()
+current_weights_id = None
+birefnet = None
+
+
+def load_birefnet(weights_name: str):
+    global birefnet, current_weights_id
+
+    weights_id = '/'.join(('zhengpeng7', usage_to_weights_file[weights_name]))
+    if birefnet is not None and current_weights_id == weights_id:
+        return birefnet
+
+    print(f'Loading weights: {weights_id}.')
+    model = transformers.AutoModelForImageSegmentation.from_pretrained(
+        weights_id,
+        trust_remote_code=True,
+        torch_dtype=model_dtype,
+    )
+    model.to(device)
+    model.eval()
+    if device == "cuda":
+        model.half()
+
+    birefnet = model
+    current_weights_id = weights_id
+    return birefnet
+
+
+load_birefnet('General')
 
 
 # @spaces.GPU
 def predict(images, resolution, weights_file, enable_rankseg, rankseg_metric):
     assert (images is not None), 'AssertionError: images cannot be None.'
 
-    global birefnet
-    # Load BiRefNet with chosen weights
-    _weights_file = '/'.join(('zhengpeng7', usage_to_weights_file[weights_file] if weights_file is not None else usage_to_weights_file['General']))
-    print('Using weights: {}.'.format(_weights_file))
-    birefnet = transformers.AutoModelForImageSegmentation.from_pretrained(_weights_file, trust_remote_code=True)
-    birefnet.to(device)
-    birefnet.eval(); birefnet.half()
+    selected_weights = weights_file if weights_file is not None else 'General'
+    model = load_birefnet(selected_weights)
 
     try:
         resolution = [int(int(reso)//32*32) for reso in resolution.strip().split('x')]
@@ -321,7 +361,8 @@ def predict(images, resolution, weights_file, enable_rankseg, rankseg_metric):
 
         # Prediction
         with torch.no_grad():
-            preds = birefnet(image_proc.to(device).half())[-1].sigmoid().float().cpu()
+            image_tensor = image_proc.to(device=device, dtype=model_dtype)
+            preds = model(image_tensor)[-1].sigmoid().float().cpu()
         pred = preds[0].squeeze()
 
         pred_pil = transforms.ToPILImage()(pred)
@@ -449,4 +490,4 @@ demo = gr.TabbedInterface(
 )
 
 if __name__ == "__main__":
-    demo.launch(debug=True)
+    demo.launch(debug=True, server_name="127.0.0.1")
